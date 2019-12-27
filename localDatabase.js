@@ -16,6 +16,7 @@ const lDB = (function () {
     lDB._pendingMutexLock = new Mutex.Mutex();
     lDB._numberOfActiveReaders = 0;
     lDB._activeMutexLock = new Mutex.Mutex();
+    lDB._closingDbName = '';
 
     // static functions
     lDB.addAndHandleCollection = function (objectStoreName, objectToAdd, handlerCallback) {
@@ -113,74 +114,72 @@ const lDB = (function () {
 
 
     lDB._addToObjectStore = function (objectStoreName, objectToAdd) {
-        var addPromise = new Promise((resolveAddObject, rejectAddObject) => {
-            lDB._ensureDesiredDatabaseIsOpen().then(() => {
-                if (!lDB._doesDatabaseHaveObjectStore(objectStoreName)) {
-                    lDB._createObjectStore(objectStoreName).then(() => {
-                        lDB._addToObjectStore(objectStoreName, objectToAdd).then(() => {
-                            resolveAddObject();
-                        });
-                    });
-                }
-                else {
-                    var transaction = lDB.activeDb.transaction([objectStoreName], "readwrite");
-                    transaction.oncomplete = function (event) {
-                        /* doesn't need to be handled per se */
-                    };
-                    transaction.onerror = function (event) { rejectAddObject(event); };
-                    var objectStore = transaction.objectStore(objectStoreName);
-                    var objectStoreRequest = objectStore.add(objectToAdd);
-                    objectStoreRequest.onsuccess = function (event) {
-                        resolveAddObject(event);
-                    };
-                    objectStoreRequest.onerror = function (event) { rejectAddObject(event); }
-                }
+        return new Promise((resolveAddObject, rejectAddObject) => {
+            this._ensureDatabaseHasObjectStore(objectStoreName).then(() => {
+
+                // var __addTransaction = function (resolveAddObject, rejectAddObject) {
+                var transaction = lDB.activeDb.transaction([objectStoreName], "readwrite");
+                // transaction.oncomplete = function (event) {
+                //     /* doesn't need to be handled per se */
+                // };
+                transaction.onerror = function (event) { rejectAddObject(event); };
+                var objectStore = transaction.objectStore(objectStoreName);
+                var objectStoreRequest = objectStore.add(objectToAdd);
+                objectStoreRequest.onsuccess = function (event) {
+                    resolveAddObject(event);
+                };
+                objectStoreRequest.onerror = function (event) { rejectAddObject(event); }
+                // }
             });
+
         });
-        return addPromise;
+
+
+
+        //         lDB._ensureDesiredDatabaseIsOpen().then(() => {
+        //             if (!lDB.__hasObjectStore(objectStoreName)) {
+        //                 lDB._createObjectStore(objectStoreName).then(() => {
+        //                     lDB._addToObjectStore(objectStoreName, objectToAdd).then(() => {
+        //                         resolveAddObject();
+        //                     });
+        //                 });
+        //             }
+        //             else {
+        //             }
+        //         });
+        //     });
+        //     return addPromise;
+        // }
     }
 
 
     lDB._readObjectStore = function (objectStoreName, key, storeHandlerFunction) {
         var promise = new Promise((resolve, reject) => {
-            if (objectStoreName === undefined) {
-                if (lDB.activeDb !== undefined) {
-                    if (lDB.activeDb.objectStoreNames.length > 0) {
-                        objectStoreName = lDB.activeDb.objectStoreNames[0];
-                    }
-                }
-            }
-            if (!lDB._doesDatabaseHaveObjectStore(objectStoreName)) {
-                lDB._createObjectStore(objectStoreName).then(() => { lDB._readObjectStore(objectStoreName, key) });
-            }
-            else {
-                lDB._ensureDesiredDatabaseIsOpen().then(() => {
-                    var transaction = lDB.activeDb.transaction([objectStoreName], "readonly");
+            lDB._ensureDatabaseHasObjectStore(objectStoreName).then(() => {
 
-                    // report on the success of the transaction completing, when everything is done
-                    transaction.oncomplete = function (event) { /**/ };
-                    transaction.onerror = function (event) { reject(event); };
-                    var objectStore = transaction.objectStore(objectStoreName);
-                    var objectStoreRequest;
+                var transaction = lDB.activeDb.transaction([objectStoreName], "readonly");
 
-                    // Get all objects if a key is not defined
-                    if (key !== undefined) { objectStoreRequest = objectStore.get(key); }
-                    else { objectStoreRequest = objectStore.getAll(); }
+                transaction.onerror = function (event) { reject(event); };
+                var objectStore = transaction.objectStore(objectStoreName);
+                var objectStoreRequest;
 
-                    objectStoreRequest.onsuccess = function (event) {
-                        lDB.objectStore = {
-                            name: objectStoreName,
-                            contents: event.target.result
-                        };
-                        // use the custom handler function if one was given
-                        if (storeHandlerFunction !== undefined) { storeHandlerFunction(lDB.objectStore); }
-                        resolve(lDB.objectStore);
+                // Get all objects if a key is not defined
+                if (key !== undefined) { objectStoreRequest = objectStore.get(key); }
+                else { objectStoreRequest = objectStore.getAll(); }
+
+                objectStoreRequest.onsuccess = function (event) {
+                    lDB.objectStore = {
+                        name: objectStoreName,
+                        contents: event.target.result
                     };
-                    objectStoreRequest.onerror = function (event) {
-                        reject(event);
-                    }
-                });
-            }
+                    // use the custom handler function if one was given
+                    if (storeHandlerFunction !== undefined) { storeHandlerFunction(lDB.objectStore); }
+                    resolve(lDB.objectStore);
+                };
+                objectStoreRequest.onerror = function (event) {
+                    reject(event);
+                }
+            });
         });
         return promise;
     }
@@ -196,7 +195,7 @@ const lDB = (function () {
         }
         var promise = new Promise((resolve, reject) => {
             lDB._ensureDesiredDatabaseIsOpen().then(() => {
-                if (!lDB._doesDatabaseHaveObjectStore(name)) {
+                if (!lDB.__hasObjectStore(name)) {
                     var nextVersion = lDB.activeDb.version + 1;
                     // if (lDB.activeDb !== undefined) { // should never happen now after mutex lock was implemented...?
                     if (lDB.activeDb === undefined) {
@@ -219,6 +218,7 @@ const lDB = (function () {
                                 });
                             }
                         }
+                        lDB._closingDbName = '';
                         lDB._openDatabase(nextVersion, versionChangeCallback);
                     });
                 }
@@ -237,7 +237,7 @@ const lDB = (function () {
         }
         var promise = new Promise((resolve, reject) => {
             lDB._ensureDesiredDatabaseIsOpen().then(() => {
-                if (lDB._doesDatabaseHaveObjectStore(name)) {
+                if (lDB.__hasObjectStore(name)) {
                     var nextVersion = lDB.activeDb.version + 1;
                     var __versionChangeCallback = function (event) {
                         var db = event.target.result;
@@ -255,6 +255,7 @@ const lDB = (function () {
                     if (lDB.activeDb !== undefined) {
                         lDB.activeDb.close();
                     }
+                    lDB._closingDbName = '';
                     lDB._openDatabase(nextVersion, __versionChangeCallback);
                 }
                 else {
@@ -266,21 +267,41 @@ const lDB = (function () {
         return promise;
     }
 
-    lDB._doesDatabaseHaveObjectStore = function (objectStoreName) {
-        if (!lDB._isDesiredDatabaseOpen()) {
-            lDB._ensureDesiredDatabaseIsOpen()
-                .then(() => { return lDB._doesDatabaseHaveObjectStore(objectStoreName); });
-        }
-        else {
-            var names = Array.from(lDB.activeDb.objectStoreNames);
-            for (let i = 0; i < names.length; i++) {
-                if (names[i] === objectStoreName) {
-                    return true;
-                }
+    lDB.__hasObjectStore = function (objectStoreName) {
+        var names = Array.from(lDB.activeDb.objectStoreNames);
+        for (let i = 0; i < names.length; i++) {
+            if (names[i] === objectStoreName) {
+                return true;
             }
-            return false;
         }
+        return false;
     }
+
+
+    lDB._ensureDatabaseHasObjectStore = function (objectStoreName) {
+        return new Promise(resolve => {
+            lDB._ensureDesiredDatabaseIsOpen().then(() => {
+                if (lDB.__hasObjectStore(objectStoreName)) {
+                    resolve();
+                }
+                else {
+                    lDB._createObjectStore(objectStoreName).then(() => {
+                        resolve();
+                    });
+                }
+            });
+        });
+    }
+    // });
+
+
+    // if (!lDB._isDesiredDatabaseOpen()) {
+    //     lDB._ensureDesiredDatabaseIsOpen()
+    //         .then(() => { return lDB.__hasObjectStore(objectStoreName); });
+    // }
+    // else {
+    // }
+    // }
 
     lDB._ensureDesiredDatabaseIsOpen = function () {
         var promise = new Promise((resolve) => {
@@ -327,7 +348,7 @@ const lDB = (function () {
                             lDB._openDbWithinMutex(resolve, reject, versionNumber, versionChangeCallback)
                         }
                         else {
-                            var endTime = window.performance.now() + lDB.timeoutMilliseconds;
+                            var endTime = performance.now() + lDB.timeoutMilliseconds;
                             var databaseName = lDB.databaseName;
                             lDB._checkDatabaseWithDetermination(resolve, 16, endTime, reject, databaseName, versionNumber, versionChangeCallback)
                         }
@@ -348,7 +369,7 @@ const lDB = (function () {
             versionChangeCallback = null;
         }
 
-        var request = window.indexedDB.open(lDB.databaseName, versionNumber);
+        var request = indexedDB.open(lDB.databaseName, versionNumber);
         request.onsuccess = function (event) {
             lDB.activeDb = event.target.result;
             lDB._decrementPendingRequests();
@@ -390,9 +411,9 @@ const lDB = (function () {
             // otherwise we send our request and play the waiting game
             else {
 
-                // openRequest = window.indexedDB.open(lDB.databaseName);
+                // openRequest = indexedDB.open(lDB.databaseName);
                 // the resolve callback will be activated after the open request raises the onsuccess event
-                var startTime = window.performance.now();
+                var startTime = performance.now();
                 var timeoutMilliseconds = lDB.openTimeoutMilliseconds;
                 var endTime = startTime + timeoutMilliseconds;
                 var databaseName = lDB.databaseName; //defining it here means we will keep checking for it
@@ -423,7 +444,7 @@ const lDB = (function () {
         if (recheck) {
             // timeout is optional
             if (endTime !== undefined) {
-                if (window.performance.now() > endTime) {
+                if (performance.now() > endTime) {
                     rejectCallback(lDB.activeDb);
                 }
             }
@@ -451,7 +472,11 @@ const lDB = (function () {
                 resolve();
             }
             else {
+                lDB._closingDbName = lDB.databaseName;
                 lDB.activeDb.close();
+                lDB.activeDb = undefined;
+                lDB._numberOfActiveReaders = 0;
+                lDB._numberOfPendingRequests = 0;
                 resolve();
             }
         });
@@ -477,7 +502,7 @@ const lDB = (function () {
                 else {
                     deleteRequest = indexedDB.deleteDatabase(name);
                     deleteRequest.onblocked = (function (event) { reject(event) });
-                    deleteRequest.onupgradeneeded = (function () { }); // shouldn't happen but if it does it would be followed by another event
+                    deleteRequest.onupgradeneeded = (function () { return }); // shouldn't happen but if it does it would be followed by another event
                     deleteRequest.onerror = (function (event) { reject(event) });
                     deleteRequest.onsuccess = (function (event) {
                         lDB.activeDb = undefined;
